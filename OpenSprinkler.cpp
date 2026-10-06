@@ -1872,16 +1872,42 @@ void OpenSprinkler::latch_boost(int8_t volt) {
 		digitalWriteExt(PIN_BOOST, LOW);       // disable boost converter
 	} else {
 		if(volt == 0) volt = DEFAULT_LATCH_BOOST_VOLTAGE;
-	    // boost to specified volt, up to time specified by BOOST_TIME
-    	uint16_t top = (uint16_t)(volt * 19.25f); // ADC = 1024 * volt * 1.5k / 79.8k
-		if(analogRead(PIN_CURR_SENSE)>=top) return; // if the voltage has already reached top, return right away
-    	uint32_t boost_timeout = millis() + (iopts[IOPT_BOOST_TIME]<<2);
-    	digitalWriteExt(PIN_BOOST, HIGH);
-    	// boost until either top voltage is reached or boost timeout is reached
-		while((long)(millis()-boost_timeout)<0 && analogRead(PIN_CURR_SENSE)<top) { // overflow proof
-      		delay(5);
-    	}
-    	digitalWriteExt(PIN_BOOST, LOW);
+		auto read_volt_mv = []() -> uint32_t {
+			#ifdef PIN_LATCH_VOLT_SENSE
+			const uint8_t sense_pin = PIN_LATCH_VOLT_SENSE;
+			#else
+			const uint8_t sense_pin = PIN_CURR_SENSE;
+			#endif
+			#if defined(ESP32)
+			return (uint32_t)analogReadMilliVolts(sense_pin) * LATCH_VSENSE_R_TOP_x10 / LATCH_VSENSE_R_BOT_x10;
+			#else
+			return (uint32_t)analogRead(sense_pin) * 1000UL * LATCH_VSENSE_R_TOP_x10 / LATCH_VSENSE_R_BOT_x10 / 1024;
+			#endif
+		};
+		const uint32_t tmax = (uint32_t)iopts[IOPT_BOOST_TIME] << 2;
+		const uint32_t target_mv = (uint32_t)volt * 1000;
+		const uint32_t v0 = read_volt_mv();
+		DEBUG_PRINTF("[LATCH] boost target=%dV start=%lumV\n", (int)volt, (unsigned long)v0);
+
+		digitalWriteExt(PIN_BOOST, HIGH);
+		const uint32_t start = millis();
+		delay(LATCH_MIN_BOOST_MS); // always charge, even if the initial sense reading is high
+		uint32_t v = read_volt_mv();
+		uint32_t elapsed = (uint32_t)(millis() - start);
+		while(elapsed < tmax && v < target_mv) {
+			delay(tmax - elapsed < 5 ? tmax - elapsed : 5);
+			v = read_volt_mv();
+			elapsed = (uint32_t)(millis() - start);
+		}
+		bool fallback = false;
+		if(v < v0 + 1000 && elapsed < tmax) {
+			fallback = true;
+			delay(tmax - elapsed);
+			v = read_volt_mv();
+		}
+		digitalWriteExt(PIN_BOOST, LOW);
+		DEBUG_PRINTF("[LATCH] boost end=%lumV after %lums (fallback=%d)\n",
+			(unsigned long)v, (unsigned long)(uint32_t)(millis() - start), (int)fallback);
 	}
 }
 
